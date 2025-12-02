@@ -3,6 +3,7 @@
 import io
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -106,6 +107,8 @@ class PyMuPDFExtractor:
 
     def _extract_pdf(self, file_bytes: bytes, file_name: str = "unknown.pdf") -> str:
         """Extract from PDF using PyMuPDF4LLM."""
+        # pymupdf4llm requires a file path, so we still need temp file for native extraction
+        # But we can optimize OCR path to potentially use in-memory handling
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
             tmp_file.write(file_bytes)
             tmp_path = tmp_file.name
@@ -153,6 +156,7 @@ class PyMuPDFExtractor:
                 )
 
                 with Timer("pdf_ocr") as ocr_timer:
+                    # Use existing temp file path for OCR (already on disk)
                     text = self._ocr_pdf(tmp_path, file_name)
 
                 logger.info(
@@ -173,8 +177,71 @@ class PyMuPDFExtractor:
             except Exception:
                 pass
 
+    def _ocr_page(
+        self, pdf_path: str, page_num: int, file_name: str
+    ) -> tuple[int, str, float]:
+        """OCR a single page - worker function for parallel processing.
+
+        Args:
+            pdf_path: Path to the PDF file
+            page_num: Page number to process (0-indexed)
+            file_name: Original file name for logging
+
+        Returns:
+            Tuple of (page_num, extracted_text, elapsed_time_ms)
+        """
+        import time
+
+        start_time = time.time()
+
+        try:
+            # Open PDF and render specific page
+            pdf_document = fitz.open(pdf_path)
+            page = pdf_document[page_num]
+            pix = page.get_pixmap(dpi=self.config.dpi)
+
+            # Convert to PIL Image
+            img_data = pix.tobytes("png")
+            image = Image.open(io.BytesIO(img_data))
+
+            # Perform OCR with configured languages
+            page_text = pytesseract.image_to_string(
+                image,
+                lang=self.config.languages,
+                config=f"--psm {self.config.psm_mode}",
+            )
+
+            pdf_document.close()
+
+            elapsed_ms = (time.time() - start_time) * 1000
+
+            logger.info(
+                f"OCR completed for page {page_num + 1}",
+                extra_data={
+                    "file_name": file_name,
+                    "page_number": page_num + 1,
+                    "characters_extracted": len(page_text.strip()),
+                    "ocr_time_ms": elapsed_ms,
+                },
+            )
+
+            return (page_num, page_text.strip(), elapsed_ms)
+
+        except Exception as e:
+            logger.error(
+                f"OCR failed for page {page_num + 1}",
+                extra_data={
+                    "file_name": file_name,
+                    "page_number": page_num + 1,
+                    "error_type": type(e).__name__,
+                    "error": str(e),
+                },
+                exc_info=True,
+            )
+            return (page_num, "", 0.0)
+
     def _ocr_pdf(self, pdf_path: str, file_name: str = "unknown.pdf") -> str:
-        """Perform OCR on a PDF using Tesseract.
+        """Perform OCR on a PDF using Tesseract with parallel processing.
 
         Args:
             pdf_path: Path to the PDF file
@@ -184,50 +251,36 @@ class PyMuPDFExtractor:
             Extracted text from all pages
         """
         try:
-            # Open PDF and convert pages to images
+            # Get page count
             pdf_document = fitz.open(pdf_path)
             page_count = len(pdf_document)
-            all_text = []
+            pdf_document.close()
 
             logger.debug(
-                "Starting OCR on PDF pages",
+                "Starting parallel OCR on PDF pages",
                 extra_data={
                     "file_name": file_name,
                     "page_count": page_count,
+                    "max_workers": self.config.max_workers,
                 },
             )
 
-            for page_num in range(page_count):
-                with Timer(f"ocr_page_{page_num}") as page_timer:
-                    # Render page to image at configured DPI
-                    page = pdf_document[page_num]
-                    pix = page.get_pixmap(dpi=self.config.dpi)
+            # Process pages in parallel using ThreadPoolExecutor
+            page_results = {}
+            with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+                # Submit all pages for processing
+                future_to_page = {
+                    executor.submit(self._ocr_page, pdf_path, page_num, file_name): page_num
+                    for page_num in range(page_count)
+                }
 
-                    # Convert to PIL Image
-                    img_data = pix.tobytes("png")
-                    image = Image.open(io.BytesIO(img_data))
+                # Collect results as they complete
+                for future in as_completed(future_to_page):
+                    page_num, page_text, _ = future.result()
+                    page_results[page_num] = page_text
 
-                    # Perform OCR with configured languages
-                    page_text = pytesseract.image_to_string(
-                        image,
-                        lang=self.config.languages,
-                        config=f"--psm {self.config.psm_mode}",
-                    )
-
-                    if page_text.strip():
-                        all_text.append(page_text.strip())
-
-                    logger.info(
-                        f"OCR completed for page {page_num + 1}/{page_count}",
-                        extra_data={
-                            "file_name": file_name,
-                            "page_number": page_num + 1,
-                            "characters_extracted": len(page_text.strip()),
-                            "ocr_time_ms": page_timer.get_elapsed_ms(),
-                        },
-                    )
-
-            pdf_document.close()
+            # Reconstruct text in correct page order
+            all_text = [page_results[i] for i in range(page_count) if page_results[i]]
 
             total_text = "\n\n".join(all_text)
 

@@ -11,8 +11,9 @@ class OCRConfig:
     tesseract_cmd: str = "tesseract"
     tessdata_prefix: Optional[str] = None
     languages: str = "rus+kaz+eng"
-    dpi: int = 200
-    psm_mode: int = 3  # Page segmentation mode
+    dpi: int = 150
+    psm_mode: int = 6
+    max_workers: int = 4 
 
 
 @dataclass
