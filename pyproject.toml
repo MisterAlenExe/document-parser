@@ -8,7 +8,6 @@ version = "0.1.0"
 description = "Document parsing library with OCR support for PDF, DOCX, and images"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
 dependencies = [
     "pymupdf4llm>=0.0.17",
     "python-docx>=1.1.0",
