@@ -2,6 +2,8 @@
 
 import io
 import os
+import shutil
+import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -34,6 +36,7 @@ class PyMuPDFExtractor:
             config: OCR configuration. If None, uses defaults.
         """
         self.config = config or OCRConfig()
+        self.last_ocr_used = False
 
         # Set Tesseract environment variables if provided
         if self.config.tesseract_cmd:
@@ -64,6 +67,7 @@ class PyMuPDFExtractor:
             ExtractionError: If extraction fails
         """
         suffix = Path(file_name).suffix.lower()
+        self.last_ocr_used = False
 
         logger.debug(
             "Starting document extraction",
@@ -77,8 +81,12 @@ class PyMuPDFExtractor:
         try:
             if suffix == ".pdf":
                 return self._extract_pdf(file_bytes, file_name)
-            elif suffix in [".docx", ".doc"]:
+            elif suffix == ".docx":
                 return self._extract_docx(file_bytes, file_name)
+            elif suffix == ".doc":
+                return self._extract_doc(file_bytes, file_name)
+            elif suffix == ".xls":
+                return self._extract_xls(file_bytes, file_name)
             elif suffix in [".png", ".jpg", ".jpeg", ".tiff", ".bmp"]:
                 return self._extract_image(file_bytes, file_name)
             else:
@@ -114,6 +122,8 @@ class PyMuPDFExtractor:
             tmp_path = tmp_file.name
 
         try:
+            page_count = self._get_page_count(tmp_path)
+
             # PyMuPDF4LLM handles:
             # - Native text extraction (fast path)
             # - Table detection and markdown formatting
@@ -142,31 +152,41 @@ class PyMuPDFExtractor:
                 extra_data={
                     "file_name": file_name,
                     "characters_extracted": char_count,
+                    "page_count": page_count,
                     "extraction_time_ms": native_timer.get_elapsed_ms(),
                 },
             )
 
-            # If no text extracted, it's likely a scanned/image-only PDF - use OCR
-            if not text:
+            should_ocr = self._should_ocr_pdf(char_count, page_count, len(file_bytes))
+
+            # If no text extracted or text clearly too small for PDF size/page count
+            if should_ocr:
                 logger.info(
-                    "No native text found in PDF, attempting OCR",
+                    "Triggering OCR fallback for PDF",
                     extra_data={
                         "file_name": file_name,
+                        "native_characters": char_count,
+                        "page_count": page_count,
                     },
                 )
 
                 with Timer("pdf_ocr") as ocr_timer:
                     # Use existing temp file path for OCR (already on disk)
-                    text = self._ocr_pdf(tmp_path, file_name)
+                    ocr_text = self._ocr_pdf(tmp_path, file_name)
 
                 logger.info(
                     "OCR extraction completed",
                     extra_data={
                         "file_name": file_name,
-                        "characters_extracted": len(text),
+                        "characters_extracted": len(ocr_text),
                         "ocr_time_ms": ocr_timer.get_elapsed_ms(),
                     },
                 )
+
+                # Prefer OCR output if it is longer than the native extraction
+                if len(ocr_text) > char_count:
+                    text = ocr_text
+                    self.last_ocr_used = True
 
             return text
 
@@ -308,6 +328,41 @@ class PyMuPDFExtractor:
             )
             return ""
 
+    def _should_ocr_pdf(
+        self, native_char_count: int, page_count: int, file_size_bytes: int
+    ) -> bool:
+        """Decide whether to run OCR fallback after native extraction."""
+
+        # If no text was extracted, always try OCR
+        if native_char_count == 0:
+            return True
+
+        # Heuristic: very little text per page likely means scanned PDF
+        if page_count > 0 and (
+            native_char_count / page_count
+        ) < self.config.pdf_ocr_min_chars_per_page:
+            return True
+
+        # Heuristic: small absolute text for a reasonably sized file
+        if (
+            native_char_count < self.config.pdf_ocr_min_chars
+            and file_size_bytes >= self.config.pdf_ocr_min_file_size_bytes
+        ):
+            return True
+
+        return False
+
+    @staticmethod
+    def _get_page_count(pdf_path: str) -> int:
+        """Return page count, swallowing errors to keep extraction resilient."""
+        try:
+            pdf_document = fitz.open(pdf_path)
+            page_count = len(pdf_document)
+            pdf_document.close()
+            return page_count
+        except Exception:
+            return 0
+
     def _extract_docx(self, file_bytes: bytes, file_name: str = "unknown.docx") -> str:
         """Extract from DOCX using python-docx."""
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp_file:
@@ -367,6 +422,134 @@ class PyMuPDFExtractor:
                 Path(tmp_path).unlink()
             except Exception:
                 pass
+
+    def _extract_doc(self, file_bytes: bytes, file_name: str = "unknown.doc") -> str:
+        """Extract text from legacy .doc using system converters if available."""
+        with tempfile.NamedTemporaryFile(suffix=".doc", delete=False) as tmp_file:
+            tmp_file.write(file_bytes)
+            tmp_path = Path(tmp_file.name)
+
+        try:
+            # Prefer macOS textutil if present
+            if shutil.which("textutil"):
+                with Timer("doc_textutil") as timer:
+                    result = subprocess.run(
+                        [
+                            "textutil",
+                            "-convert",
+                            "txt",
+                            str(tmp_path),
+                            "-stdout",
+                        ],
+                        capture_output=True,
+                        text=True,
+                    )
+
+                if result.returncode == 0 and result.stdout.strip():
+                    logger.info(
+                        "DOC extraction completed via textutil",
+                        extra_data={
+                            "file_name": file_name,
+                            "characters_extracted": len(result.stdout.strip()),
+                            "extraction_time_ms": timer.get_elapsed_ms(),
+                        },
+                    )
+                    return result.stdout.strip()
+
+            # Fallback to LibreOffice/soffice if available
+            soffice = shutil.which("soffice") or shutil.which("libreoffice")
+            if soffice:
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    with Timer("doc_soffice") as timer:
+                        conversion = subprocess.run(
+                            [
+                                soffice,
+                                "--headless",
+                                "--convert-to",
+                                "txt:Text",
+                                str(tmp_path),
+                                "--outdir",
+                                tmp_dir,
+                            ],
+                            capture_output=True,
+                            text=True,
+                        )
+
+                    if conversion.returncode == 0:
+                        out_path = Path(tmp_dir) / f"{tmp_path.stem}.txt"
+                        if out_path.exists():
+                            with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
+                                content = f.read().strip()
+
+                            logger.info(
+                                "DOC extraction completed via soffice",
+                                extra_data={
+                                    "file_name": file_name,
+                                    "characters_extracted": len(content),
+                                    "extraction_time_ms": timer.get_elapsed_ms(),
+                                },
+                            )
+                            return content
+
+            raise ExtractionError(
+                "Failed to extract .doc file. Install textutil (macOS) or LibreOffice, or convert to DOCX."
+            )
+        finally:
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+    def _extract_xls(self, file_bytes: bytes, file_name: str = "unknown.xls") -> str:
+        """Extract text from legacy .xls using xlrd."""
+        try:
+            import xlrd
+        except ImportError as exc:
+            raise ExtractionError(
+                "xlrd is required for .xls extraction. Please install xlrd."
+            ) from exc
+
+        try:
+            with Timer("xls_extraction") as timer:
+                workbook = xlrd.open_workbook(file_contents=file_bytes)
+                parts: list[str] = []
+
+                for sheet in workbook.sheets():
+                    parts.append(f"## Sheet: {sheet.name}")
+                    for row_idx in range(sheet.nrows):
+                        row_values = []
+                        for cell_value in sheet.row_values(row_idx):
+                            if isinstance(cell_value, float) and cell_value.is_integer():
+                                cell_str = str(int(cell_value))
+                            else:
+                                cell_str = str(cell_value)
+                            row_values.append(cell_str.strip())
+                        parts.append(" | ".join(row_values))
+
+                result = "\n".join(parts).strip()
+
+            logger.info(
+                "XLS extraction completed",
+                extra_data={
+                    "file_name": file_name,
+                    "sheet_count": len(workbook.sheets()),
+                    "characters_extracted": len(result),
+                    "extraction_time_ms": timer.get_elapsed_ms(),
+                },
+            )
+
+            return result
+        except Exception as exc:
+            logger.error(
+                "XLS extraction failed",
+                extra_data={
+                    "file_name": file_name,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+                exc_info=True,
+            )
+            raise ExtractionError(f"Failed to extract .xls file: {exc}") from exc
 
     def _extract_image(self, file_bytes: bytes, file_name: str = "unknown.jpg") -> str:
         """Extract from image using Tesseract OCR directly."""

@@ -13,7 +13,10 @@ class OCRConfig:
     languages: str = "rus+kaz+eng"
     dpi: int = 150
     psm_mode: int = 6
-    max_workers: int = 4 
+    max_workers: int = 4
+    pdf_ocr_min_chars: int = 500
+    pdf_ocr_min_chars_per_page: int = 150
+    pdf_ocr_min_file_size_bytes: int = 200_000
 
 
 @dataclass

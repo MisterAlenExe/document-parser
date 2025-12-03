@@ -153,7 +153,9 @@ class DocumentHandler:
                 try:
                     text = self.extractor.extract(file_bytes, file_name)
                     descriptor.character_count = len(text)
-                    descriptor.ocr_used = self._detect_ocr_usage(file_name, text)
+                    descriptor.ocr_used = getattr(
+                        self.extractor, "last_ocr_used", False
+                    ) or self._detect_ocr_usage(file_name, text)
 
                     logger.info(
                         "Successfully extracted text from document",

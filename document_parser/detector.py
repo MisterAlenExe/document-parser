@@ -11,6 +11,7 @@ logger = get_logger(__name__)
 PDF_SIGNATURE = b"%PDF"
 ZIP_SIGNATURE = b"PK\x03\x04"
 PNG_SIGNATURE = b"\x89PNG"
+OLE_SIGNATURE = b"\xd0\xcf\x11\xe0"  # Legacy Office container
 JPEG_SIGNATURES = (b"\xff\xd8\xff\xdb", b"\xff\xd8\xff\xe0", b"\xff\xd8\xff\xe1")
 
 
@@ -40,17 +41,6 @@ class DocumentDetector:
             },
         )
 
-        # Reject XLSX files immediately (even if they have ZIP signature)
-        if mime_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
-            logger.warning(
-                "Rejected unsupported XLSX file",
-                extra_data={
-                    "file_name": file_name,
-                    "mime_type": mime_type,
-                },
-            )
-            raise ValueError(f"Unsupported mime type: {mime_type}")
-
         sniffed_type = self._sniff_mime(file_bytes)
         if sniffed_type:
             mime_type = sniffed_type
@@ -75,14 +65,18 @@ class DocumentDetector:
                     },
                 )
 
-        if mime_type not in {
+        supported_types = {
             "application/pdf",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/msword",
+            "application/vnd.ms-excel",
             "image/png",
             "image/jpeg",
             "image/jpg",
             "text/plain",
-        }:
+        }
+
+        if mime_type not in supported_types:
             logger.warning(
                 "Unsupported MIME type detected",
                 extra_data={
@@ -118,6 +112,9 @@ class DocumentDetector:
         if head.startswith(ZIP_SIGNATURE):
             # DOCX files are ZIP archives
             return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        if head.startswith(OLE_SIGNATURE):
+            # Legacy Office container (.doc/.xls). Disambiguate via extension later.
+            return None
         if head.startswith(PNG_SIGNATURE):
             return "image/png"
         for jpeg_sig in JPEG_SIGNATURES:

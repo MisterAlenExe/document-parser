@@ -6,9 +6,11 @@ A Python library for parsing documents with OCR support. Extracts text from PDF,
 
 - 📄 **PDF Support**: Native text extraction with OCR fallback for scanned documents
 - 📝 **DOCX Support**: Extract text and tables from Word documents
+- 🧾 **Legacy DOC/XLS Support**: Converts older Office formats via built-ins/xlrd
 - 🖼️ **Image Support**: OCR for PNG, JPEG, TIFF, and BMP images
 - 🌍 **Multi-language OCR**: Supports Russian, Kazakh, English, and more
 - ⚡ **Fast**: Uses PyMuPDF for native PDF text extraction
+- 🔁 **Smart OCR Fallback**: Automatically re-runs OCR when native PDF text is too small (likely scans)
 - 🎯 **Simple API**: High-level `parse_document()` function and low-level classes
 
 ## Installation
@@ -131,6 +133,8 @@ print(result.text)
 | PDF (text) | `application/pdf` | Magic bytes | PyMuPDF native |
 | PDF (scanned) | `application/pdf` | Magic bytes | Tesseract OCR |
 | DOCX | `application/vnd...wordprocessingml.document` | ZIP signature | python-docx |
+| DOC (legacy) | `application/msword` | Extension | textutil/LibreOffice -> text |
+| XLS (legacy) | `application/vnd.ms-excel` | Extension | xlrd -> markdown tables |
 | PNG | `image/png` | Magic bytes | Tesseract OCR |
 | JPEG | `image/jpeg` | Magic bytes | Tesseract OCR |
 | Text | `text/plain` | Extension | UTF-8 decode |
