@@ -87,6 +87,8 @@ class PyMuPDFExtractor:
                 return self._extract_doc(file_bytes, file_name)
             elif suffix == ".xls":
                 return self._extract_xls(file_bytes, file_name)
+            elif suffix == ".xlsx":
+                return self._extract_xlsx(file_bytes, file_name)
             elif suffix in [".png", ".jpg", ".jpeg", ".tiff", ".bmp"]:
                 return self._extract_image(file_bytes, file_name)
             else:
@@ -550,6 +552,62 @@ class PyMuPDFExtractor:
                 exc_info=True,
             )
             raise ExtractionError(f"Failed to extract .xls file: {exc}") from exc
+
+    def _extract_xlsx(self, file_bytes: bytes, file_name: str = "unknown.xlsx") -> str:
+        """Extract text from modern .xlsx files using openpyxl."""
+        try:
+            from openpyxl import load_workbook
+        except ImportError as exc:
+            raise ExtractionError(
+                "openpyxl is required for .xlsx extraction. Please install openpyxl."
+            ) from exc
+
+        try:
+            with Timer("xlsx_extraction") as timer:
+                # Load workbook from bytes
+                workbook = load_workbook(io.BytesIO(file_bytes), data_only=True)
+                parts: list[str] = []
+
+                for sheet_name in workbook.sheetnames:
+                    sheet = workbook[sheet_name]
+                    parts.append(f"## Sheet: {sheet_name}")
+
+                    for row in sheet.iter_rows(values_only=True):
+                        row_values = []
+                        for cell_value in row:
+                            if cell_value is None:
+                                cell_str = ""
+                            elif isinstance(cell_value, float) and cell_value.is_integer():
+                                cell_str = str(int(cell_value))
+                            else:
+                                cell_str = str(cell_value)
+                            row_values.append(cell_str.strip())
+                        parts.append(" | ".join(row_values))
+
+                result = "\n".join(parts).strip()
+
+            logger.info(
+                "XLSX extraction completed",
+                extra_data={
+                    "file_name": file_name,
+                    "sheet_count": len(workbook.sheetnames),
+                    "characters_extracted": len(result),
+                    "extraction_time_ms": timer.get_elapsed_ms(),
+                },
+            )
+
+            return result
+        except Exception as exc:
+            logger.error(
+                "XLSX extraction failed",
+                extra_data={
+                    "file_name": file_name,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+                exc_info=True,
+            )
+            raise ExtractionError(f"Failed to extract .xlsx file: {exc}") from exc
 
     def _extract_image(self, file_bytes: bytes, file_name: str = "unknown.jpg") -> str:
         """Extract from image using Tesseract OCR directly."""

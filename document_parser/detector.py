@@ -41,7 +41,7 @@ class DocumentDetector:
             },
         )
 
-        sniffed_type = self._sniff_mime(file_bytes)
+        sniffed_type = self._sniff_mime(file_bytes, file_name)
         if sniffed_type:
             mime_type = sniffed_type
             logger.debug(
@@ -68,6 +68,7 @@ class DocumentDetector:
         supported_types = {
             "application/pdf",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "application/msword",
             "application/vnd.ms-excel",
             "image/png",
@@ -104,13 +105,19 @@ class DocumentDetector:
         )
 
     @staticmethod
-    def _sniff_mime(file_bytes: bytes) -> str | None:
+    def _sniff_mime(file_bytes: bytes, file_name: str = "") -> str | None:
         """Detect MIME type from file signature/magic bytes."""
         head = file_bytes[:4]
         if head.startswith(PDF_SIGNATURE):
             return "application/pdf"
         if head.startswith(ZIP_SIGNATURE):
-            # DOCX files are ZIP archives
+            # Both DOCX and XLSX files are ZIP archives, disambiguate via extension
+            file_lower = file_name.lower()
+            if file_lower.endswith(".xlsx"):
+                return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            elif file_lower.endswith(".docx"):
+                return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            # Default to DOCX if extension unclear
             return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         if head.startswith(OLE_SIGNATURE):
             # Legacy Office container (.doc/.xls). Disambiguate via extension later.
