@@ -13,7 +13,7 @@ import fitz  # PyMuPDF
 import pymupdf4llm
 import pytesseract
 from docx import Document
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 from document_parser.config import OCRConfig
 from document_parser.exceptions import ExtractionError
@@ -199,13 +199,36 @@ class PyMuPDFExtractor:
             except Exception:
                 pass
 
+    def _preprocess_image(self, image: Image.Image) -> Image.Image:
+        """Preprocess image for better OCR performance and accuracy.
+        
+        Args:
+            image: PIL Image to preprocess
+            
+        Returns:
+            Preprocessed PIL Image
+        """
+        if not self.config.enable_image_preprocessing:
+            return image
+        
+        # Convert to grayscale if not already (faster OCR, better accuracy)
+        if image.mode != "L":
+            image = image.convert("L")
+        
+        # Enhance contrast (helps with scanned documents)
+        if self.config.contrast_enhancement != 1.0:
+            enhancer = ImageEnhance.Contrast(image)
+            image = enhancer.enhance(self.config.contrast_enhancement)
+        
+        return image
+
     def _ocr_page(
-        self, pdf_path: str, page_num: int, file_name: str
+        self, pdf_document: fitz.Document, page_num: int, file_name: str
     ) -> tuple[int, str, float]:
         """OCR a single page - worker function for parallel processing.
 
         Args:
-            pdf_path: Path to the PDF file
+            pdf_document: Open PyMuPDF document (reused for all pages)
             page_num: Page number to process (0-indexed)
             file_name: Original file name for logging
 
@@ -217,27 +240,34 @@ class PyMuPDFExtractor:
         start_time = time.time()
 
         try:
-            # Open PDF and render specific page
-            pdf_document = fitz.open(pdf_path)
+            # Render page to pixmap
             page = pdf_document[page_num]
-            pix = page.get_pixmap(dpi=self.config.dpi)
+            # Use matrix for faster rendering with quality control
+            mat = fitz.Matrix(self.config.dpi / 72, self.config.dpi / 72)
+            pix = page.get_pixmap(matrix=mat, alpha=False)  # alpha=False is faster
 
-            # Convert to PIL Image
-            img_data = pix.tobytes("png")
-            image = Image.open(io.BytesIO(img_data))
+            # Convert to PIL Image directly from pixmap (more efficient)
+            image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
+            # Preprocess image for better OCR performance
+            image = self._preprocess_image(image)
+
+            # Build Tesseract config with performance optimizations
+            # --oem 1: Use LSTM OCR engine only (faster than legacy)
+            # --psm: Page segmentation mode
+            oem_mode = "1" if self.config.use_oem_1 else "3"  # 3 = default (both engines)
+            tesseract_config = f"--oem {oem_mode} --psm {self.config.psm_mode}"
+            
             # Perform OCR with configured languages
             page_text = pytesseract.image_to_string(
                 image,
                 lang=self.config.languages,
-                config=f"--psm {self.config.psm_mode}",
+                config=tesseract_config,
             )
-
-            pdf_document.close()
 
             elapsed_ms = (time.time() - start_time) * 1000
 
-            logger.info(
+            logger.debug(
                 f"OCR completed for page {page_num + 1}",
                 extra_data={
                     "file_name": file_name,
@@ -265,6 +295,12 @@ class PyMuPDFExtractor:
     def _ocr_pdf(self, pdf_path: str, file_name: str = "unknown.pdf") -> str:
         """Perform OCR on a PDF using Tesseract with parallel processing.
 
+        Optimizations:
+        - Opens PDF once and reuses document object (avoids repeated file I/O)
+        - Uses optimized image preprocessing
+        - Uses Tesseract OEM 1 (LSTM engine, faster than legacy)
+        - Parallel processing with configurable worker count
+
         Args:
             pdf_path: Path to the PDF file
             file_name: Original file name for logging
@@ -272,11 +308,11 @@ class PyMuPDFExtractor:
         Returns:
             Extracted text from all pages
         """
+        pdf_document = None
         try:
-            # Get page count
+            # Open PDF once and reuse for all pages (major performance improvement)
             pdf_document = fitz.open(pdf_path)
             page_count = len(pdf_document)
-            pdf_document.close()
 
             logger.debug(
                 "Starting parallel OCR on PDF pages",
@@ -284,15 +320,18 @@ class PyMuPDFExtractor:
                     "file_name": file_name,
                     "page_count": page_count,
                     "max_workers": self.config.max_workers,
+                    "dpi": self.config.dpi,
                 },
             )
 
             # Process pages in parallel using ThreadPoolExecutor
+            # Reuse the same PDF document object for all workers
             page_results = {}
             with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
                 # Submit all pages for processing
+                # Pass the document object instead of path to avoid repeated opens
                 future_to_page = {
-                    executor.submit(self._ocr_page, pdf_path, page_num, file_name): page_num
+                    executor.submit(self._ocr_page, pdf_document, page_num, file_name): page_num
                     for page_num in range(page_count)
                 }
 
@@ -329,6 +368,10 @@ class PyMuPDFExtractor:
                 exc_info=True,
             )
             return ""
+        finally:
+            # Ensure PDF document is closed
+            if pdf_document:
+                pdf_document.close()
 
     def _should_ocr_pdf(
         self, native_char_count: int, page_count: int, file_size_bytes: int
@@ -627,12 +670,19 @@ class PyMuPDFExtractor:
                 },
             )
 
+            # Preprocess image for better OCR performance
+            image = self._preprocess_image(image)
+
+            # Build Tesseract config with performance optimizations
+            oem_mode = "1" if self.config.use_oem_1 else "3"  # 3 = default (both engines)
+            tesseract_config = f"--oem {oem_mode} --psm {self.config.psm_mode}"
+
             # Perform OCR with configured languages
             with Timer("image_ocr") as timer:
                 text = pytesseract.image_to_string(
                     image,
                     lang=self.config.languages,
-                    config=f"--psm {self.config.psm_mode}",
+                    config=tesseract_config,
                 )
 
             result = text.strip()
