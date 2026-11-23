@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from document_parser.config import OCRConfig
-from document_parser.detector import DocumentDescriptor, DocumentDetector
+from document_parser.detector import DocumentDetector
 from document_parser.exceptions import (
     DecodingError,
     ExtractionError,
@@ -167,6 +167,8 @@ class DocumentHandler:
                             "extraction_time_ms": extract_timer.get_elapsed_ms(),
                         },
                     )
+                except UnsupportedTypeError:
+                    raise
                 except Exception as exc:
                     logger.error(
                         "Document extraction failed",

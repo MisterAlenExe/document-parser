@@ -16,7 +16,8 @@ from docx import Document
 from PIL import Image, ImageEnhance
 
 from document_parser.config import OCRConfig
-from document_parser.exceptions import ExtractionError
+from document_parser.detector import PDF_SIGNATURE
+from document_parser.exceptions import ExtractionError, UnsupportedTypeError
 from document_parser.logger import Timer, get_logger
 
 logger = get_logger(__name__)
@@ -87,19 +88,11 @@ class PyMuPDFExtractor:
                 return self._extract_doc(file_bytes, file_name)
             elif suffix == ".xls":
                 return self._extract_xls(file_bytes, file_name)
-            elif suffix == ".xlsx":
+            elif suffix in (".xlsx", ".xlsm"):
                 return self._extract_xlsx(file_bytes, file_name)
             elif suffix in [".png", ".jpg", ".jpeg", ".tiff", ".bmp"]:
                 return self._extract_image(file_bytes, file_name)
-            else:
-                # Fallback: treat as PDF
-                logger.warning(
-                    "Unknown file extension, attempting PDF extraction",
-                    extra_data={
-                        "file_name": file_name,
-                        "file_extension": suffix,
-                    },
-                )
+            elif file_bytes.startswith(PDF_SIGNATURE):
                 return self._extract_pdf(file_bytes, file_name)
 
         except Exception as exc:
@@ -114,6 +107,8 @@ class PyMuPDFExtractor:
                 exc_info=True,
             )
             raise ExtractionError(f"Failed to extract document: {exc}") from exc
+
+        raise UnsupportedTypeError(f"Unsupported file extension: {suffix or '(none)'}")
 
     def _extract_pdf(self, file_bytes: bytes, file_name: str = "unknown.pdf") -> str:
         """Extract from PDF using PyMuPDF4LLM."""
@@ -597,12 +592,12 @@ class PyMuPDFExtractor:
             raise ExtractionError(f"Failed to extract .xls file: {exc}") from exc
 
     def _extract_xlsx(self, file_bytes: bytes, file_name: str = "unknown.xlsx") -> str:
-        """Extract text from modern .xlsx files using openpyxl."""
+        """Extract cached values from .xlsx and .xlsm workbooks using openpyxl."""
         try:
             from openpyxl import load_workbook
         except ImportError as exc:
             raise ExtractionError(
-                "openpyxl is required for .xlsx extraction. Please install openpyxl."
+                "openpyxl is required for Excel workbook extraction."
             ) from exc
 
         try:
@@ -630,7 +625,7 @@ class PyMuPDFExtractor:
                 result = "\n".join(parts).strip()
 
             logger.info(
-                "XLSX extraction completed",
+                "Excel workbook extraction completed",
                 extra_data={
                     "file_name": file_name,
                     "sheet_count": len(workbook.sheetnames),
@@ -642,7 +637,7 @@ class PyMuPDFExtractor:
             return result
         except Exception as exc:
             logger.error(
-                "XLSX extraction failed",
+                "Excel workbook extraction failed",
                 extra_data={
                     "file_name": file_name,
                     "error_type": type(exc).__name__,
@@ -650,7 +645,7 @@ class PyMuPDFExtractor:
                 },
                 exc_info=True,
             )
-            raise ExtractionError(f"Failed to extract .xlsx file: {exc}") from exc
+            raise ExtractionError(f"Failed to extract Excel workbook: {exc}") from exc
 
     def _extract_image(self, file_bytes: bytes, file_name: str = "unknown.jpg") -> str:
         """Extract from image using Tesseract OCR directly."""

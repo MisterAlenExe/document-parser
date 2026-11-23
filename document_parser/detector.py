@@ -1,6 +1,8 @@
 """Document type detection and validation."""
 
+import io
 import mimetypes
+from zipfile import BadZipFile, ZipFile
 from dataclasses import dataclass
 
 from document_parser.logger import get_logger
@@ -10,6 +12,7 @@ logger = get_logger(__name__)
 
 PDF_SIGNATURE = b"%PDF"
 ZIP_SIGNATURE = b"PK\x03\x04"
+XLSM_MIME_TYPE = "application/vnd.ms-excel.sheet.macroenabled.12"
 PNG_SIGNATURE = b"\x89PNG"
 OLE_SIGNATURE = b"\xd0\xcf\x11\xe0"  # Legacy Office container
 JPEG_SIGNATURES = (b"\xff\xd8\xff\xdb", b"\xff\xd8\xff\xe0", b"\xff\xd8\xff\xe1")
@@ -69,6 +72,7 @@ class DocumentDetector:
             "application/pdf",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            XLSM_MIME_TYPE,
             "application/msword",
             "application/vnd.ms-excel",
             "image/png",
@@ -107,12 +111,23 @@ class DocumentDetector:
     @staticmethod
     def _sniff_mime(file_bytes: bytes, file_name: str = "") -> str | None:
         """Detect MIME type from file signature/magic bytes."""
+        file_lower = file_name.lower()
+        if file_lower.endswith(".xlsm"):
+            try:
+                with ZipFile(io.BytesIO(file_bytes)) as workbook:
+                    workbook.getinfo("[Content_Types].xml")
+                    workbook.getinfo("xl/workbook.xml")
+            except (BadZipFile, KeyError) as exc:
+                raise ValueError(
+                    "Unsupported .xlsm file: expected an Excel OOXML workbook"
+                ) from exc
+            return XLSM_MIME_TYPE
+
         head = file_bytes[:4]
         if head.startswith(PDF_SIGNATURE):
             return "application/pdf"
         if head.startswith(ZIP_SIGNATURE):
             # Both DOCX and XLSX files are ZIP archives, disambiguate via extension
-            file_lower = file_name.lower()
             if file_lower.endswith(".xlsx"):
                 return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             elif file_lower.endswith(".docx"):
